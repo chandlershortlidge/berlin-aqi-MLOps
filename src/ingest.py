@@ -232,7 +232,7 @@ if __name__ == "__main__":
     )
     load_dotenv()
 
-    location_id = int(os.getenv("BERLIN_LOCATION_ID", "7178"))
+    location_id = int(os.getenv("BERLIN_LOCATION_ID", "3019"))
     now = datetime.now(timezone.utc)
     iso = "%Y-%m-%dT%H:%M:%SZ"
     datetime_from = (now - timedelta(days=7)).strftime(iso)
