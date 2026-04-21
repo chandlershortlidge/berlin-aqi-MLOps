@@ -195,8 +195,12 @@ def validate(df: pd.DataFrame) -> None:
         )
 
     pm25 = df["pm25"].dropna()
-    if (pm25 < 0).any():
-        raise IngestError("Range check failed — negative PM2.5 values present")
+    negatives = int((pm25 < 0).sum())
+    if negatives:
+        logger.warning(
+            "Range check: %d negative PM2.5 values (sensor artifact — clamped to 0 in clean)",
+            negatives,
+        )
 
     extreme = int((pm25 > 500).sum())
     if extreme:
@@ -211,9 +215,12 @@ def validate(df: pd.DataFrame) -> None:
 
 
 def clean(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop metadata columns, drop null-PM2.5 rows, interpolate short gaps."""
+    """Drop metadata columns, drop null-PM2.5 rows, clamp negatives, interpolate short gaps."""
     df = df.drop(columns=[c for c in DROP_COLS if c in df.columns])
     df = df.dropna(subset=["pm25"]).reset_index(drop=True)
+
+    # Negative PM2.5 is physically impossible — sensor baseline drift artifact. Clamp to 0.
+    df.loc[df["pm25"] < 0, "pm25"] = 0
 
     gap_fill = [c for c in POLLUTANTS if c != "pm25" and c in df.columns]
     df[gap_fill] = df[gap_fill].interpolate(
