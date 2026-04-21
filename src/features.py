@@ -113,6 +113,31 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def build_inference_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Lag + rolling + time features with NO target shift.
+
+    Used at serving time: the most recent hour has no t+1 ground truth,
+    so we can't drop it via the target-NaN filter the way build_features
+    does. Only drops rows still missing lag / rolling features (warmup).
+    """
+    sort_cols = [c for c in ["location_id", "datetime"] if c in df.columns]
+    df = df.sort_values(sort_cols).reset_index(drop=True)
+
+    df = add_lag_features(df, "pm25")
+    df = add_rolling_features(df, "pm25")
+    df = add_time_features(df)
+
+    required = (
+        [f"pm25_lag_{lag}" for lag in PM25_LAGS]
+        + [f"pm25_roll{w}_mean" for w in ROLLING_WINDOWS]
+        + [f"pm25_roll{w}_std" for w in ROLLING_WINDOWS]
+    )
+    before = len(df)
+    df = df.dropna(subset=required).reset_index(drop=True)
+    logger.info("Dropped %d inference rows with NaN lag/rolling; %d remain", before - len(df), len(df))
+    return df
+
+
 def time_train_test_split(
     df: pd.DataFrame,
     test_frac: float = 0.2,

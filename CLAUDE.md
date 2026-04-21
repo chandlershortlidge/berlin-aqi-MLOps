@@ -47,12 +47,36 @@ End-to-end MLOps pipeline that predicts air quality risk categories for athletes
 ## Common commands
 
 ```bash
-uv sync                      # install/refresh env from pyproject.toml
-uv add <package>             # add a new dependency
-uv run <script.py>           # run inside the managed venv
-uv run pytest                # tests
-uv run uvicorn api.main:app  # serve API locally
+uv sync                         # install/refresh env from pyproject.toml
+uv add <package>                # add a new dependency
+uv run <script.py>              # run inside the managed venv
+uv run pytest                   # tests
+uv run uvicorn api.main:app     # serve API locally
+uv run python -m src.ingest --multi --days 730   # full 2yr multi-station ingest
+uv run python -m src.features                    # build features + train/test split
+uv run python -m src.train --tune                # train with RandomizedSearchCV
+uv run python -m src.register                    # promote latest tuned model to @production
+uv run python -m src.refresh                     # one-shot hourly refresh (cache)
+docker compose up --build                        # local container stack (API + MLflow UI)
 ```
+
+## Hourly refresh (Phase 5)
+
+`/predict` returns **pre-computed predictions from a cache**, not live model
+inference. A scheduled job (`src.refresh`) ingests the last 48h for all 17
+eligible stations, runs the production model on each station's current hour,
+and writes `data/cache/predictions.json` + appends monitoring rows.
+
+Locally, add to `crontab -e`:
+
+```cron
+0 * * * * cd /Users/chandlershortlidge/berlin-aqi-MLOps && /Users/chandlershortlidge/.local/bin/uv run python -m src.refresh >> logs/refresh.log 2>&1
+```
+
+On AWS: EventBridge triggers a scheduled ECS task / Lambda that invokes the
+same `python -m src.refresh` entry point. Artifact paths in `mlflow.db`
+should be S3 URIs by then (not local absolute paths), so the container
+doesn't need the bind-mount hack from `docker-compose.yml`.
 
 ## AWS / deployment
 

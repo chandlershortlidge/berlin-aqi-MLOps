@@ -158,8 +158,7 @@ def fetch(
     )
 
     with _client(key) as client:
-        loc_resp = client.get(f"/locations/{location_id}")
-        loc_resp.raise_for_status()
+        loc_resp = _get_with_retry(client, f"/locations/{location_id}")
         location = loc_resp.json()["results"][0]
 
         metadata = {
@@ -303,8 +302,7 @@ def fetch_coordinates(
     if not key:
         raise IngestError("OPENAQ_API_KEY not set in environment")
     with _client(key) as client:
-        resp = client.get(f"/locations/{location_id}")
-        resp.raise_for_status()
+        resp = _get_with_retry(client, f"/locations/{location_id}")
         coords = resp.json()["results"][0].get("coordinates") or {}
     if "latitude" not in coords or "longitude" not in coords:
         raise IngestError(f"Location {location_id} has no coordinates")
