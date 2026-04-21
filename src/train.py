@@ -5,12 +5,17 @@ XGBClassifier with inverse-frequency sample weights, evaluates on F2
 (primary) plus accuracy / precision / recall / confusion matrix, and
 logs the whole run to MLflow.
 
-This is the MVP pass: default hyperparameters, no RandomizedSearchCV
-tuning yet, no SMOTE, no registry promotion. Those follow once we
-have a baseline F2 to beat.
+Two entry points:
+- `python -m src.train`         → baseline with default hyperparams
+- `python -m src.train --tune`  → RandomizedSearchCV over F2 macro,
+                                   then refit best params on full
+                                   train with sample weights
+
+SMOTE fallback and registry promotion come in follow-up commits.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 from datetime import datetime, timezone
@@ -26,9 +31,11 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
     fbeta_score,
+    make_scorer,
     precision_score,
     recall_score,
 )
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from sklearn.preprocessing import LabelEncoder
 from xgboost import XGBClassifier
 
@@ -51,6 +58,16 @@ DEFAULT_XGB_PARAMS = {
     "tree_method": "hist",
     "random_state": 42,
     "n_jobs": -1,
+}
+
+# Search space for RandomizedSearchCV (see planning doc Step 3.4)
+PARAM_DISTRIBUTIONS = {
+    "n_estimators": [100, 200, 300, 500, 800],
+    "max_depth": [3, 4, 5, 6, 8, 10],
+    "learning_rate": [0.01, 0.03, 0.05, 0.1, 0.2],
+    "min_child_weight": [1, 3, 5, 10],
+    "subsample": [0.6, 0.8, 1.0],
+    "colsample_bytree": [0.6, 0.8, 1.0],
 }
 
 
@@ -164,12 +181,94 @@ def plot_confusion_matrix(
     return out_path
 
 
+def tune_hyperparameters(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    n_iter: int = 20,
+    cv_splits: int = 5,
+    random_state: int = 42,
+) -> tuple[dict, float, pd.DataFrame]:
+    """RandomizedSearchCV with StratifiedKFold, scored on F2 macro.
+
+    Two adaptations for rare classes:
+    - Classes with fewer rows than cv_splits are dropped from the search
+      set (StratifiedKFold can't put them in every fold's train half).
+      At Mitte this drops the single High+ row.
+    - Remaining labels are re-encoded to contiguous 0..k-1 because
+      XGBoost rejects non-contiguous label sets.
+
+    Stratification is used instead of TimeSeriesSplit: rare classes would
+    otherwise be absent from early time-ordered folds. The held-out test
+    set is still strictly time-based (from features.py) so final
+    evaluation remains honest.
+
+    Sample weights are NOT applied during the search — that would require
+    sklearn metadata routing. The caller refits the winning params on the
+    full train set (all 5 classes) with sample_weight applied.
+
+    Returns (best_params, best_cv_f2, cv_results_df).
+    """
+    unique, counts = np.unique(y_train, return_counts=True)
+    viable = unique[counts >= cv_splits]
+    mask = np.isin(y_train, viable)
+    dropped = int((~mask).sum())
+    if dropped:
+        excluded = sorted(set(unique) - set(viable))
+        logger.warning(
+            "Dropping %d row(s) with rare classes %s from CV search (< %d per class)",
+            dropped, excluded, cv_splits,
+        )
+
+    X_cv = X_train[mask].reset_index(drop=True)
+    remap = {old: new for new, old in enumerate(sorted(viable))}
+    y_cv = np.array([remap[v] for v in y_train[mask]])
+    n_cv_classes = len(viable)
+
+    f2_scorer = make_scorer(fbeta_score, beta=2, average="macro", zero_division=0)
+    cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=random_state)
+
+    base = XGBClassifier(
+        num_class=n_cv_classes,
+        objective="multi:softprob",
+        tree_method="hist",
+        random_state=random_state,
+        n_jobs=-1,
+    )
+
+    search = RandomizedSearchCV(
+        base,
+        param_distributions=PARAM_DISTRIBUTIONS,
+        n_iter=n_iter,
+        scoring=f2_scorer,
+        cv=cv,
+        random_state=random_state,
+        n_jobs=1,  # avoid oversubscription — XGBoost already uses all cores
+        verbose=1,
+        refit=False,
+    )
+    logger.info("Starting RandomizedSearchCV: %d trials × %d folds = %d fits",
+                n_iter, cv_splits, n_iter * cv_splits)
+    search.fit(X_cv, y_cv)
+    logger.info("Best CV F2 macro: %.4f", search.best_score_)
+    logger.info("Best params: %s", search.best_params_)
+
+    return search.best_params_, float(search.best_score_), pd.DataFrame(search.cv_results_)
+
+
 def run(
     train_path: Path | None = None,
     test_path: Path | None = None,
     experiment_name: str = "berlin-aqi-xgboost",
+    override_params: dict | None = None,
+    cv_results: pd.DataFrame | None = None,
+    run_tag: str = "baseline",
 ) -> dict:
-    """End-to-end training run. Returns the metrics dict."""
+    """End-to-end training run. Returns the metrics dict.
+
+    If `override_params` is passed (e.g. from RandomizedSearchCV), they
+    merge on top of DEFAULT_XGB_PARAMS. If `cv_results` is passed, the
+    full search results are logged as a CSV artifact.
+    """
     if train_path is None or test_path is None:
         train_path, test_path = _latest_pair()
     logger.info("Train: %s", train_path)
@@ -182,17 +281,17 @@ def run(
 
     sample_weights = compute_sample_weights(y_train)
     n_classes = len(encoder.classes_)
-    params = {**DEFAULT_XGB_PARAMS, "num_class": n_classes}
+    params = {**DEFAULT_XGB_PARAMS, **(override_params or {}), "num_class": n_classes}
 
     mlflow.set_experiment(experiment_name)
-    with mlflow.start_run() as run_ctx:
+    with mlflow.start_run(tags={"run_type": run_tag}) as run_ctx:
         mlflow.log_params(params)
         mlflow.log_param("n_features", len(feature_cols))
         mlflow.log_param("n_train", len(X_train))
         mlflow.log_param("n_test", len(X_test))
         mlflow.log_param("class_weighting", "inverse_frequency")
 
-        model = train_model(X_train, y_train, sample_weights, n_classes)
+        model = train_model(X_train, y_train, sample_weights, n_classes, params=params)
 
         metrics = {
             **evaluate(model, X_train, y_train, encoder, "train"),
@@ -222,12 +321,17 @@ def run(
         features_path.write_text(json.dumps(feature_cols, indent=2))
         mlflow.log_artifact(str(features_path))
 
+        if cv_results is not None:
+            cv_path = MODEL_DIR / "cv_results.csv"
+            cv_results.to_csv(cv_path, index=False)
+            mlflow.log_artifact(str(cv_path))
+
         # Log the model
         mlflow.xgboost.log_model(model, name="model")
 
         # Local copy for Phase 5 serving
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        local_model_path = MODEL_DIR / f"xgb_{stamp}.json"
+        local_model_path = MODEL_DIR / f"xgb_{run_tag}_{stamp}.json"
         model.save_model(local_model_path)
 
         logger.info("MLflow run: %s", run_ctx.info.run_id)
@@ -236,9 +340,47 @@ def run(
     return metrics
 
 
+def run_tuning(
+    train_path: Path | None = None,
+    test_path: Path | None = None,
+    n_iter: int = 20,
+    cv_splits: int = 5,
+    experiment_name: str = "berlin-aqi-xgboost",
+) -> dict:
+    """Tune via RandomizedSearchCV, then refit best params on full train with sample weights."""
+    if train_path is None or test_path is None:
+        train_path, test_path = _latest_pair()
+
+    X_train, y_train, _, _, _, _ = load_data(train_path, test_path)
+    best_params, best_cv_f2, cv_results = tune_hyperparameters(
+        X_train, y_train, n_iter=n_iter, cv_splits=cv_splits
+    )
+
+    metrics = run(
+        train_path=train_path,
+        test_path=test_path,
+        experiment_name=experiment_name,
+        override_params=best_params,
+        cv_results=cv_results,
+        run_tag="tuned",
+    )
+    metrics["best_cv_f2_macro"] = best_cv_f2
+    return metrics
+
+
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    metrics = run()
+
+    parser = argparse.ArgumentParser(description="Train Berlin AQI XGBoost model.")
+    parser.add_argument("--tune", action="store_true", help="RandomizedSearchCV over F2 macro")
+    parser.add_argument("--n-iter", type=int, default=20, help="Number of tuning trials")
+    parser.add_argument("--cv-splits", type=int, default=5, help="TimeSeriesSplit folds")
+    args = parser.parse_args()
+
+    if args.tune:
+        metrics = run_tuning(n_iter=args.n_iter, cv_splits=args.cv_splits)
+    else:
+        metrics = run()
 
     print("\n=== Metrics ===")
     for k, v in sorted(metrics.items()):
