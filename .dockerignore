@@ -1,0 +1,30 @@
+.git/
+.venv/
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+.ruff_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Big + local-only
+data/
+mlruns/
+notebooks/
+tests/
+frontend/
+
+# Local editor / OS noise
+.vscode/
+.idea/
+.claude/
+.DS_Store
+
+# Secrets — the container gets env vars at runtime, not baked in
+.env
+.env.*
+
+# Docs that don't affect runtime
+Berlin_AQI_MLOps_Planning_Document.docx
