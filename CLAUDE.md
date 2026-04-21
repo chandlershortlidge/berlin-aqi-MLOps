@@ -34,6 +34,7 @@ End-to-end MLOps pipeline that predicts air quality risk categories for athletes
 - **Python 3.11** — pinned via `.python-version` / `pyproject.toml`
 - **uv** for package management — never `pip install` or `requirements.txt`. Use `uv add <pkg>` and `uv sync`
 - **pyproject.toml** is the single source of truth for dependencies
+- **macOS prerequisite:** `brew install libomp` — XGBoost's `libxgboost.dylib` links to OpenMP at runtime and won't import without it. Linux distros ship `libgomp` with the system.
 - **.env** for secrets — never commit. `python-dotenv` loads it at runtime
 - **src/** holds the pipeline code, **api/** the FastAPI app, **frontend/** the UI, **notebooks/** for exploration only (not production paths)
 - Raw API pulls land in `data/raw/`, engineered features in `data/processed/` — both gitignored
