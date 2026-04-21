@@ -4,7 +4,7 @@ End-to-end MLOps pipeline that predicts air quality risk categories for athletes
 
 ## Pipeline
 
-1. **Ingest** — pull pollutant + weather data from the OpenAQ API
+1. **Ingest** — pull pollutants from OpenAQ and weather (temp, RH) from the Open-Meteo archive API. Berlin government PM2.5 stations don't report weather, so the two sources are merged on `datetime`.
 2. **Feature engineering** — build training features from raw measurements
 3. **Training** — XGBoost classifier, experiments tracked with MLflow
 4. **Containerize** — package model + serving layer in Docker

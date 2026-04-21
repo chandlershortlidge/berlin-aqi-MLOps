@@ -1,4 +1,9 @@
-"""Fetch, validate, clean, and save Berlin AQI data from the OpenAQ v3 API."""
+"""Fetch, validate, clean, and save Berlin AQI data.
+
+Pollutants come from the OpenAQ v3 API. Weather covariates (temperature,
+relative humidity) come from the Open-Meteo historical archive API because
+Berlin government PM2.5 stations don't report weather.
+"""
 from __future__ import annotations
 
 import logging
@@ -14,6 +19,7 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 OPENAQ_BASE_URL = "https://api.openaq.org/v3"
+OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 POLLUTANTS = ["pm25", "pm10", "o3", "no2", "so2", "co"]
 METADATA_COLS = [
     "datetimeLocal",
@@ -226,6 +232,72 @@ def save(df: pd.DataFrame, out_dir: Path = RAW_DATA_DIR) -> Path:
     return path
 
 
+def fetch_coordinates(
+    location_id: int, api_key: str | None = None
+) -> tuple[float, float]:
+    """Return (latitude, longitude) for an OpenAQ location."""
+    key = api_key or os.getenv("OPENAQ_API_KEY")
+    if not key:
+        raise IngestError("OPENAQ_API_KEY not set in environment")
+    with _client(key) as client:
+        resp = client.get(f"/locations/{location_id}")
+        resp.raise_for_status()
+        coords = resp.json()["results"][0].get("coordinates") or {}
+    if "latitude" not in coords or "longitude" not in coords:
+        raise IngestError(f"Location {location_id} has no coordinates")
+    return float(coords["latitude"]), float(coords["longitude"])
+
+
+def fetch_weather(
+    latitude: float,
+    longitude: float,
+    datetime_from: str,
+    datetime_to: str,
+) -> pd.DataFrame:
+    """Fetch hourly temperature + relative humidity from Open-Meteo archive.
+
+    Returns a DataFrame with columns: datetime (UTC), temperature, relative_humidity.
+    """
+    start_date = pd.Timestamp(datetime_from).strftime("%Y-%m-%d")
+    end_date = pd.Timestamp(datetime_to).strftime("%Y-%m-%d")
+
+    logger.info(
+        "Fetching weather lat=%s lon=%s %s..%s",
+        latitude,
+        longitude,
+        start_date,
+        end_date,
+    )
+
+    with httpx.Client(timeout=60.0) as client:
+        resp = client.get(
+            OPEN_METEO_ARCHIVE_URL,
+            params={
+                "latitude": latitude,
+                "longitude": longitude,
+                "start_date": start_date,
+                "end_date": end_date,
+                "hourly": "temperature_2m,relative_humidity_2m",
+                "timezone": "UTC",
+            },
+        )
+        resp.raise_for_status()
+        body = resp.json()
+
+    hourly = body.get("hourly") or {}
+    if not hourly.get("time"):
+        raise IngestError("Open-Meteo returned no hourly data")
+
+    df = pd.DataFrame(
+        {
+            "datetime": pd.to_datetime(hourly["time"], utc=True),
+            "temperature": hourly["temperature_2m"],
+            "relative_humidity": hourly["relative_humidity_2m"],
+        }
+    )
+    return df.sort_values("datetime").reset_index(drop=True)
+
+
 if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
@@ -241,4 +313,9 @@ if __name__ == "__main__":
     raw_df = fetch(location_id, datetime_from, datetime_to)
     validate(raw_df)
     cleaned_df = clean(raw_df)
-    save(cleaned_df)
+
+    lat, lon = fetch_coordinates(location_id)
+    weather_df = fetch_weather(lat, lon, datetime_from, datetime_to)
+    combined_df = cleaned_df.merge(weather_df, on="datetime", how="left")
+
+    save(combined_df)
