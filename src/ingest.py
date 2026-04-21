@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,8 @@ from typing import Any
 import httpx
 import pandas as pd
 from dotenv import load_dotenv
+
+RETRIABLE_STATUSES = {408, 429, 500, 502, 503, 504}
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,35 @@ def _client(api_key: str) -> httpx.Client:
     )
 
 
+def _get_with_retry(
+    client: httpx.Client,
+    url: str,
+    params: dict | None = None,
+    max_retries: int = 4,
+) -> httpx.Response:
+    """GET with exponential backoff on transient errors (408, 429, 5xx, connection)."""
+    for attempt in range(max_retries):
+        try:
+            resp = client.get(url, params=params)
+            if resp.status_code not in RETRIABLE_STATUSES:
+                resp.raise_for_status()
+                return resp
+            last_error: Exception = httpx.HTTPStatusError(
+                f"{resp.status_code} {resp.reason_phrase}", request=resp.request, response=resp
+            )
+        except httpx.TransportError as exc:
+            last_error = exc
+        if attempt == max_retries - 1:
+            raise last_error
+        backoff = 2 ** attempt
+        logger.warning(
+            "Transient error on %s (attempt %d/%d): %s — retrying in %ds",
+            url, attempt + 1, max_retries, last_error, backoff,
+        )
+        time.sleep(backoff)
+    raise RuntimeError("unreachable")
+
+
 def _paginate_hours(
     client: httpx.Client,
     sensor_id: int,
@@ -65,7 +97,8 @@ def _paginate_hours(
     results: list[dict[str, Any]] = []
     page = 1
     while True:
-        resp = client.get(
+        resp = _get_with_retry(
+            client,
             f"/sensors/{sensor_id}/hours",
             params={
                 "datetime_from": datetime_from,
@@ -74,7 +107,6 @@ def _paginate_hours(
                 "page": page,
             },
         )
-        resp.raise_for_status()
         body = resp.json()
         batch = body.get("results", [])
         if not batch:
