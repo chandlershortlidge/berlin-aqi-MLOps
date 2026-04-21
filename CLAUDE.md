@@ -28,6 +28,11 @@ End-to-end MLOps pipeline that predicts air quality risk categories for athletes
 - Prediction horizon: **t+1 (next hour)** for v1. Recursive 6-hour forecast is a v2 stretch goal.
 - Primary metric: **F2 score** (recall weighted 2× precision). A false negative — predicting "safe" when air is dangerous — harms athletes; a false positive just keeps them indoors unnecessarily.
 - Class imbalance strategy: **class weights first, SMOTE as fallback**. Both logged to MLflow for comparison.
+- **"High+" is not predicted by the model — it's a PM2.5 threshold rule in the serving layer.** With only 5 "High+" training examples across 15 stations × 2yr, the model achieves F2 = 0.0 on this class. The API layer hard-codes "PM2.5 > 150.5 → High+" to catch extreme events deterministically.
+
+## Known limitations + future work
+
+- **Significant-class recall caps at ~50%** on the current 2yr multi-station dataset (F2 ≈ 0.56). Primary lever to improve it: extend station history to **3+ years** — more rare-event examples, less seasonal sampling bias. Revisit after the first full year of production data is collected.
 
 ## Conventions
 
