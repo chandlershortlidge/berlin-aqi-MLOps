@@ -209,6 +209,8 @@ __marimo__/
 # Project data + MLflow artifacts
 data/
 mlruns/
+mlflow.db
+logs/
 
 # Claude Code local settings
 .claude/settings.local.json
