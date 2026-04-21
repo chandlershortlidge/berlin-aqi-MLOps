@@ -23,6 +23,30 @@ logger = logging.getLogger(__name__)
 
 OPENAQ_BASE_URL = "https://api.openaq.org/v3"
 OPEN_METEO_ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
+
+# The 17 OpenAQ stations in the Berlin bbox with PM2.5 and >=2 years of
+# history as of Phase 1.1 EDA (2026-04-21). Includes decommissioned
+# stations (DEBE051/DEBE063) — fetch will skip them if their window is
+# entirely outside the requested range.
+ELIGIBLE_BERLIN_STATIONS = [
+    2993,     # Berlin Neukölln
+    3019,     # Berlin Mitte (v1 reference station)
+    3025,     # DEBE063 (decommissioned 2023-12-31)
+    3050,     # Potsdam, Großbeerenstr (decommissioned 2025-06-03)
+    3096,     # Potsdam, Groß Glienicke
+    4582,     # Berlin Grunewald
+    4724,     # Blankenfelde-Mahlow
+    4761,     # Berlin Wedding
+    4762,     # Berlin Schildhornstraße
+    4764,     # Berlin Mariendorfer Damm
+    4767,     # Berlin Frankfurter Allee
+    4768,     # Berlin Friedrichshagen
+    4769,     # DEBE051 (decommissioned 2024-01-29)
+    2162178,  # Berlin Leipziger Straße
+    2162179,  # Berlin Buch
+    2162180,  # Berlin Karl-Marx-Straße II
+    2162181,  # Berlin Silbersteinstraße 5
+]
 POLLUTANTS = ["pm25", "pm10", "o3", "no2", "so2", "co"]
 METADATA_COLS = [
     "datetimeLocal",
@@ -337,24 +361,82 @@ def fetch_weather(
     return df.sort_values("datetime").reset_index(drop=True)
 
 
+def fetch_all_stations(
+    location_ids: list[int],
+    datetime_from: str,
+    datetime_to: str,
+    api_key: str | None = None,
+) -> pd.DataFrame:
+    """Ingest pollutants + weather for multiple stations, stack into one DataFrame.
+
+    Each station's rows get a `location_id` column. Stations that fail
+    (no data in the window, sensor drift, API error after retries) are
+    logged and skipped so one bad station never aborts the whole run.
+    """
+    frames: list[pd.DataFrame] = []
+    skipped: list[tuple[int, str]] = []
+
+    for i, lid in enumerate(location_ids, start=1):
+        logger.info("=== Station %d (%d/%d) ===", lid, i, len(location_ids))
+        try:
+            raw = fetch(lid, datetime_from, datetime_to, api_key=api_key)
+            validate(raw)
+            cleaned = clean(raw)
+            lat, lon = fetch_coordinates(lid, api_key=api_key)
+            weather = fetch_weather(lat, lon, datetime_from, datetime_to)
+            combined = cleaned.merge(weather, on="datetime", how="left")
+            combined["location_id"] = lid
+            frames.append(combined)
+            logger.info("Station %d: %d rows", lid, len(combined))
+        except (IngestError, httpx.HTTPError, ValueError) as exc:
+            logger.error("Station %d failed — skipping: %s", lid, exc)
+            skipped.append((lid, str(exc)))
+
+    if not frames:
+        raise IngestError("No stations successfully ingested")
+
+    result = pd.concat(frames, ignore_index=True)
+    logger.info(
+        "Multi-station ingest done: %d rows across %d stations (%d skipped)",
+        len(result), result["location_id"].nunique(), len(skipped),
+    )
+    if skipped:
+        for lid, err in skipped:
+            logger.info("  skipped %d: %s", lid, err)
+    return result
+
+
 if __name__ == "__main__":
+    import argparse
+
     logging.basicConfig(
         level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
     )
     load_dotenv()
 
-    location_id = int(os.getenv("BERLIN_LOCATION_ID", "3019"))
+    parser = argparse.ArgumentParser(description="Ingest Berlin AQI data from OpenAQ + Open-Meteo.")
+    parser.add_argument("--multi", action="store_true", help="Ingest all 17 eligible Berlin stations")
+    parser.add_argument("--location-id", type=int, default=None, help="Single station override")
+    parser.add_argument("--days", type=int, default=7, help="Days of history to pull")
+    args = parser.parse_args()
+
     now = datetime.now(timezone.utc)
     iso = "%Y-%m-%dT%H:%M:%SZ"
-    datetime_from = (now - timedelta(days=7)).strftime(iso)
+    datetime_from = (now - timedelta(days=args.days)).strftime(iso)
     datetime_to = now.strftime(iso)
 
-    raw_df = fetch(location_id, datetime_from, datetime_to)
-    validate(raw_df)
-    cleaned_df = clean(raw_df)
+    if args.multi:
+        combined_df = fetch_all_stations(
+            ELIGIBLE_BERLIN_STATIONS, datetime_from, datetime_to
+        )
+    else:
+        location_id = args.location_id or int(os.getenv("BERLIN_LOCATION_ID", "3019"))
+        raw_df = fetch(location_id, datetime_from, datetime_to)
+        validate(raw_df)
+        cleaned_df = clean(raw_df)
 
-    lat, lon = fetch_coordinates(location_id)
-    weather_df = fetch_weather(lat, lon, datetime_from, datetime_to)
-    combined_df = cleaned_df.merge(weather_df, on="datetime", how="left")
+        lat, lon = fetch_coordinates(location_id)
+        weather_df = fetch_weather(lat, lon, datetime_from, datetime_to)
+        combined_df = cleaned_df.merge(weather_df, on="datetime", how="left")
 
     save(combined_df)
