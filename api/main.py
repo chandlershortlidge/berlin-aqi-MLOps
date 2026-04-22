@@ -1,14 +1,23 @@
-"""Berlin AQI FastAPI service — /predict, /health, /metrics."""
+"""Berlin AQI FastAPI service — /predict, /health, /metrics, /cache.
+
+The /predict path is cache-only: `src.refresh` writes
+`data/cache/predictions.json` on a schedule and the API just reads it.
+If the cache is missing or a station isn't in it, the endpoint returns
+503 / 404 — not 500, and not an on-the-fly ingest.
+
+This means a fresh container exposes /predict as 503 until a refresh
+has populated the cache for the first time. Run `src.refresh` inside
+the container (or on a schedule) to bootstrap.
+"""
 from __future__ import annotations
 
 import logging
 from collections import Counter
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
 from fastapi import FastAPI, HTTPException, Query
 
-from api import cache, features_runtime, model_loader, threshold_rule
+from api import cache, model_loader
 from api.schemas import HealthResponse, MetricsResponse, PredictResponse
 
 logger = logging.getLogger(__name__)
@@ -26,6 +35,14 @@ _metrics: dict = {
 async def lifespan(_: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     model_loader.load()
+    if not cache.CACHE_PATH.exists():
+        logger.warning(
+            "Prediction cache not found at %s. /predict will return 503 "
+            "until a refresh populates it. Run `python -m src.refresh` "
+            "inside the container (needs OPENAQ_API_KEY) or mount a "
+            "pre-populated data/ volume.",
+            cache.CACHE_PATH,
+        )
     yield
 
 
@@ -50,61 +67,41 @@ def health() -> HealthResponse:
 
 @app.get("/predict", response_model=PredictResponse)
 def predict(location_id: int = Query(..., description="OpenAQ location_id")) -> PredictResponse:
-    # Cache-first path (the plan's architecture — cron pre-computes)
+    if not cache.CACHE_PATH.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Prediction cache not populated yet. Run "
+                "`python -m src.refresh` (with OPENAQ_API_KEY set) "
+                "before querying /predict."
+            ),
+        )
+
     cached = cache.get(location_id)
-    if cached is not None:
-        response = PredictResponse(
-            location_id=cached["location_id"],
-            predicted_category=cached["predicted_category"],
-            target_datetime=cached["target_datetime"],
-            pm25_current=cached["pm25_current"],
-            confidence=cached["confidence"],
-            rule_override=cached["rule_override"],
-            refreshed_at=cached["refreshed_at"],
-            age_seconds=cache.age_seconds(cached["refreshed_at"]),
-            source="cache",
+    if cached is None:
+        known = sorted(cache.read_all().keys())
+        raise HTTPException(
+            status_code=404,
+            detail=f"Location {location_id} is not in the cache. Known: {known[:20]}"
+            + ("..." if len(known) > 20 else ""),
         )
-        _record(response)
-        return response
-
-    # Fallback: compute on the fly from the latest training features CSV.
-    # Only hit when the refresh cron hasn't run yet for this station.
-    logger.warning("Cache miss for location_id=%d — falling back to live compute", location_id)
-    state = model_loader.get_state()
-    try:
-        X, target_dt, pm25_current = features_runtime.get_feature_row(
-            location_id, state["feature_cols"]
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    proba = state["model"].predict_proba(X)[0]
-    pred_idx = int(proba.argmax())
-    predicted = state["label_mapping"][pred_idx]
-    confidence = float(proba.max())
-    final, rule_fired = threshold_rule.apply(predicted, pm25_current)
-    now_iso = datetime.now(timezone.utc).isoformat()
 
     response = PredictResponse(
-        location_id=location_id,
-        predicted_category=final,
-        target_datetime=target_dt.isoformat(),
-        pm25_current=pm25_current,
-        confidence=confidence,
-        rule_override=rule_fired,
-        refreshed_at=now_iso,
-        age_seconds=0,
-        source="live",
+        location_id=cached["location_id"],
+        predicted_category=cached["predicted_category"],
+        target_datetime=cached["target_datetime"],
+        pm25_current=cached["pm25_current"],
+        confidence=cached["confidence"],
+        rule_override=cached["rule_override"],
+        refreshed_at=cached["refreshed_at"],
+        age_seconds=cache.age_seconds(cached["refreshed_at"]),
+        source="cache",
     )
-    _record(response)
-    return response
-
-
-def _record(resp: PredictResponse) -> None:
     _metrics["total"] += 1
-    _metrics["by_category"][resp.predicted_category] += 1
-    if resp.rule_override:
+    _metrics["by_category"][response.predicted_category] += 1
+    if response.rule_override:
         _metrics["rule_overrides"] += 1
+    return response
 
 
 @app.get("/metrics", response_model=MetricsResponse)
@@ -114,3 +111,20 @@ def metrics() -> MetricsResponse:
         predictions_by_category=dict(_metrics["by_category"]),
         predictions_with_rule_override=_metrics["rule_overrides"],
     )
+
+
+@app.get("/cache")
+def cache_status() -> dict:
+    """Debug aid — what the cache currently has."""
+    if not cache.CACHE_PATH.exists():
+        return {"exists": False, "path": str(cache.CACHE_PATH), "stations": 0}
+    entries = cache.read_all()
+    newest = max((e["refreshed_at"] for e in entries.values()), default=None)
+    return {
+        "exists": True,
+        "path": str(cache.CACHE_PATH),
+        "stations": len(entries),
+        "station_ids": sorted(int(k) for k in entries.keys()),
+        "newest_refreshed_at": newest,
+        "newest_age_seconds": cache.age_seconds(newest) if newest else None,
+    }
