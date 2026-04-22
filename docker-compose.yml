@@ -9,8 +9,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    init: true  # clean signal handling for the two-child start.sh
     ports:
-      - "8000:8000"
+      - "8000:8000"    # FastAPI
+      - "8501:8501"    # Streamlit dashboard
     volumes:
       # features CSV cache for the live fallback path in /predict.
       # Phase 5's refresh cron writes data/cache/predictions.json,

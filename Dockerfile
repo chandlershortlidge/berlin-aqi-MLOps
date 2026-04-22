@@ -24,6 +24,7 @@ RUN uv sync --frozen --no-dev
 # Source
 COPY src/ ./src/
 COPY api/ ./api/
+COPY frontend/ ./frontend/
 
 # Baked model artifacts. `uv run python -m src.bundle` must run before
 # `docker build` to populate this directory from the MLflow registry.
@@ -43,12 +44,17 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 COPY --from=builder /app/api /app/api
+COPY --from=builder /app/frontend /app/frontend
 COPY --from=builder /app/artifacts /app/artifacts
+COPY start.sh /app/start.sh
+RUN chmod +x /app/start.sh
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Streamlit reaches FastAPI over loopback — same container, same netns.
+    API_BASE=http://localhost:8000
 
-EXPOSE 8000
+EXPOSE 8000 8501
 
-CMD ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["/app/start.sh"]
