@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from sklearn.metrics import accuracy_score, fbeta_score
 
@@ -31,13 +32,26 @@ from src.features import AQI_LABELS
 logger = logging.getLogger(__name__)
 
 MONITORING_DIR = Path(__file__).resolve().parents[1] / "data" / "monitoring"
+ARTIFACTS_DIR = Path(__file__).resolve().parents[1] / "artifacts"
 PREDICTIONS_LOG = MONITORING_DIR / "predictions.csv"
 ACTUALS_LOG = MONITORING_DIR / "actuals.csv"
 METRICS_OUT = MONITORING_DIR / "metrics.json"
+BASELINE_PATH = ARTIFACTS_DIR / "feature_baseline.json"
 
 # Tier-2 rubric signal — if rolling 24h F2 drops below this, alert.
 # Baseline test F2 macro on Mitte was 0.66; 0.50 is a meaningful regression.
 F2_ALERT_THRESHOLD = 0.50
+# PSI thresholds per the planning doc: <0.1 ok, 0.1-0.2 watch, >0.2 retrain.
+PSI_ALERT_THRESHOLD = 0.20
+
+# Which columns in predictions.csv correspond to which baseline features
+PSI_COLUMN_MAP = {
+    "pm25": "pm25_current",
+    "pm10": "pm10_current",
+    "no2": "no2_current",
+    "temperature": "temperature_current",
+    "relative_humidity": "relative_humidity_current",
+}
 
 
 def load_joined() -> pd.DataFrame:
@@ -79,6 +93,77 @@ def _metrics_for(df: pd.DataFrame) -> dict:
     }
 
 
+def compute_psi(
+    baseline_counts: list[int],
+    baseline_edges: list[float],
+    new_values: np.ndarray,
+    smoothing: float = 1e-4,
+) -> float:
+    """Population Stability Index between a baseline histogram and new data.
+
+    PSI = Σ (p_new - p_base) * ln(p_new / p_base), per bin.
+    Small smoothing keeps zeros from blowing up the log.
+
+    Returns: PSI value. Common thresholds (planning doc):
+        < 0.10  — no drift
+        0.10 – 0.20 — moderate drift (watch)
+        > 0.20 — significant drift (retrain)
+    """
+    if len(new_values) == 0:
+        return float("nan")
+    new_counts, _ = np.histogram(new_values, bins=baseline_edges)
+    base_total = max(sum(baseline_counts), 1)
+    new_total = max(len(new_values), 1)
+    base_props = np.array(baseline_counts, dtype=float) / base_total + smoothing
+    new_props = new_counts.astype(float) / new_total + smoothing
+    return float(np.sum((new_props - base_props) * np.log(new_props / base_props)))
+
+
+def check_drift(hours: int = 24) -> dict:
+    """Compute PSI per feature using the baked baseline + recent predictions.csv."""
+    if not BASELINE_PATH.exists():
+        logger.warning("No baseline at %s — skipping PSI drift check", BASELINE_PATH)
+        return {"available": False, "reason": f"no baseline at {BASELINE_PATH}"}
+    if not PREDICTIONS_LOG.exists():
+        return {"available": False, "reason": "no predictions log"}
+
+    baseline = json.loads(BASELINE_PATH.read_text())
+    preds = pd.read_csv(PREDICTIONS_LOG, parse_dates=["refreshed_at"])
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
+    recent = preds[preds["refreshed_at"] >= cutoff]
+
+    per_feature: dict[str, dict] = {}
+    for feature, col in PSI_COLUMN_MAP.items():
+        if feature not in baseline:
+            continue
+        if col not in recent.columns:
+            per_feature[feature] = {"psi": None, "n_recent": 0, "note": f"{col} missing in predictions log"}
+            continue
+        values = pd.to_numeric(recent[col], errors="coerce").dropna().values
+        if len(values) == 0:
+            per_feature[feature] = {"psi": None, "n_recent": 0}
+            continue
+        psi = compute_psi(
+            baseline[feature]["counts"],
+            baseline[feature]["bin_edges"],
+            values,
+        )
+        per_feature[feature] = {
+            "psi": psi,
+            "n_recent": int(len(values)),
+            "drift_flag": psi > PSI_ALERT_THRESHOLD,
+        }
+
+    any_drift = any(v.get("drift_flag") for v in per_feature.values())
+    return {
+        "available": True,
+        "window_hours": hours,
+        "threshold": PSI_ALERT_THRESHOLD,
+        "per_feature": per_feature,
+        "any_drift": any_drift,
+    }
+
+
 def run(f2_threshold: float = F2_ALERT_THRESHOLD) -> dict:
     joined = load_joined()
     now = datetime.now(timezone.utc)
@@ -90,12 +175,15 @@ def run(f2_threshold: float = F2_ALERT_THRESHOLD) -> dict:
     for lid, group in last_24h.groupby("location_id"):
         per_station[int(lid)] = _metrics_for(group)
 
+    drift = check_drift(hours=24)
+
     report = {
         "generated_at": now.isoformat(),
         "total_matched_records": int(len(joined)),
         "last_24h": _metrics_for(last_24h),
         "all_time": _metrics_for(joined),
         "per_station_24h": per_station,
+        "drift_24h": drift,
         "alert": False,
     }
 
@@ -110,6 +198,14 @@ def run(f2_threshold: float = F2_ALERT_THRESHOLD) -> dict:
         logger.info("Rolling 24h F2 macro: %.3f (threshold %.2f)", f2, f2_threshold)
     else:
         logger.info("Not enough matched records yet for a 24h rolling F2")
+
+    if drift.get("any_drift"):
+        report["alert"] = True
+        drifted = [k for k, v in drift["per_feature"].items() if v.get("drift_flag")]
+        logger.warning(
+            "ALERT: PSI > %.2f on features %s — retraining recommended",
+            PSI_ALERT_THRESHOLD, drifted,
+        )
 
     METRICS_OUT.parent.mkdir(parents=True, exist_ok=True)
     METRICS_OUT.write_text(json.dumps(report, indent=2, default=str))
@@ -130,5 +226,15 @@ if __name__ == "__main__":
         for lbl in AQI_LABELS:
             if lbl in report["last_24h"]["f2_per_class"]:
                 print(f"  F2 {lbl:12s} {report['last_24h']['f2_per_class'][lbl]:.3f}")
+
+    if report["drift_24h"].get("available"):
+        print(f"\nDrift (PSI, 24h window, threshold {report['drift_24h']['threshold']}):")
+        for feat, v in report["drift_24h"]["per_feature"].items():
+            if v["psi"] is None:
+                print(f"  {feat:24s} psi=--     (n={v['n_recent']})")
+            else:
+                mark = "  DRIFT" if v.get("drift_flag") else ""
+                print(f"  {feat:24s} psi={v['psi']:.3f}  (n={v['n_recent']}){mark}")
+
     if report["alert"]:
-        print("\n⚠️  ALERT: rolling F2 below threshold")
+        print("\nALERT: threshold crossed — see logs above")

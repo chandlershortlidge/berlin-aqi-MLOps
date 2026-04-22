@@ -13,6 +13,8 @@ import shutil
 from pathlib import Path
 
 import mlflow.artifacts
+import numpy as np
+import pandas as pd
 from mlflow.tracking import MlflowClient
 
 logger = logging.getLogger(__name__)
@@ -20,6 +22,38 @@ logger = logging.getLogger(__name__)
 MODEL_NAME = "berlin-aqi-xgboost"
 ALIAS = "production"
 OUT_DIR = Path(__file__).resolve().parents[1] / "artifacts"
+PROCESSED_DIR = Path(__file__).resolve().parents[1] / "data" / "processed"
+
+# Features to baseline for PSI drift. Lags are derived from pm25 (redundant),
+# and time features don't drift. These 5 are the independent inputs.
+BASELINE_FEATURES = ["pm25", "pm10", "no2", "temperature", "relative_humidity"]
+BASELINE_BINS = 10
+
+
+def _compute_baseline() -> dict:
+    """Per-feature histogram of the training features CSV for PSI drift checks."""
+    files = sorted(PROCESSED_DIR.glob("features_*.csv"), key=lambda p: p.stat().st_mtime)
+    if not files:
+        logger.warning("No training features_*.csv — skipping baseline")
+        return {}
+
+    df = pd.read_csv(files[-1])
+    baseline: dict = {}
+    for col in BASELINE_FEATURES:
+        if col not in df.columns:
+            continue
+        values = pd.to_numeric(df[col], errors="coerce").dropna()
+        if len(values) < 2:
+            continue
+        edges = np.histogram_bin_edges(values, bins=BASELINE_BINS)
+        counts, _ = np.histogram(values, bins=edges)
+        baseline[col] = {
+            "bin_edges": edges.tolist(),
+            "counts": counts.tolist(),
+            "n": int(len(values)),
+        }
+    logger.info("Baseline computed for %d features from %s", len(baseline), files[-1].name)
+    return baseline
 
 
 def main() -> None:
@@ -51,6 +85,11 @@ def main() -> None:
         "run_id": version.run_id,
         "alias": ALIAS,
     }, indent=2))
+
+    baseline = _compute_baseline()
+    if baseline:
+        (OUT_DIR / "feature_baseline.json").write_text(json.dumps(baseline, indent=2))
+        logger.info("Wrote feature_baseline.json (%d features)", len(baseline))
 
     logger.info("Bundled into %s", OUT_DIR)
 

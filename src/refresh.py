@@ -131,6 +131,8 @@ def run(stations: list[int] | None = None) -> dict:
             "refreshed_at": now.isoformat(),
         }
 
+        # Include the primary feature values so monitor.py can run PSI drift
+        # without a separate snapshot log.
         pred_rows.append({
             "refreshed_at": now.isoformat(),
             "location_id": int(lid),
@@ -139,6 +141,10 @@ def run(stations: list[int] | None = None) -> dict:
             "confidence": confidence,
             "rule_override": rule_fired,
             "pm25_current": pm25_current,
+            "pm10_current": float(latest["pm10"].iloc[0]) if "pm10" in latest else None,
+            "no2_current": float(latest["no2"].iloc[0]) if "no2" in latest else None,
+            "temperature_current": float(latest["temperature"].iloc[0]) if "temperature" in latest else None,
+            "relative_humidity_current": float(latest["relative_humidity"].iloc[0]) if "relative_humidity" in latest else None,
         })
 
         # Record the just-observed hour as an "actual" — the previous
