@@ -79,17 +79,28 @@ def _client(api_key: str) -> httpx.Client:
     return httpx.Client(
         base_url=OPENAQ_BASE_URL,
         headers={"X-API-Key": api_key},
-        timeout=30.0,
+        timeout=60.0,
     )
+
+
+# Pacing between stations in multi-station ingest — keeps us under
+# OpenAQ's per-minute ceiling when paginating lots of history.
+INTER_STATION_SLEEP_SECONDS = 3
 
 
 def _get_with_retry(
     client: httpx.Client,
     url: str,
     params: dict | None = None,
-    max_retries: int = 4,
+    max_retries: int = 7,
+    max_backoff_seconds: int = 60,
 ) -> httpx.Response:
-    """GET with exponential backoff on transient errors (408, 429, 5xx, connection)."""
+    """GET with exponential backoff on transient errors (408, 429, 5xx, connection).
+
+    Backoff schedule: 1, 2, 4, 8, 16, 32, 60 seconds — caps at max_backoff_seconds.
+    7 attempts with the cap is ~2 minutes of total patience per call, which is
+    enough to ride out OpenAQ's short bursts of 408/429 during multi-station pulls.
+    """
     for attempt in range(max_retries):
         try:
             resp = client.get(url, params=params)
@@ -103,7 +114,7 @@ def _get_with_retry(
             last_error = exc
         if attempt == max_retries - 1:
             raise last_error
-        backoff = 2 ** attempt
+        backoff = min(2 ** attempt, max_backoff_seconds)
         logger.warning(
             "Transient error on %s (attempt %d/%d): %s — retrying in %ds",
             url, attempt + 1, max_retries, last_error, backoff,
@@ -375,6 +386,8 @@ def fetch_all_stations(
     skipped: list[tuple[int, str]] = []
 
     for i, lid in enumerate(location_ids, start=1):
+        if i > 1:
+            time.sleep(INTER_STATION_SLEEP_SECONDS)
         logger.info("=== Station %d (%d/%d) ===", lid, i, len(location_ids))
         try:
             raw = fetch(lid, datetime_from, datetime_to, api_key=api_key)
