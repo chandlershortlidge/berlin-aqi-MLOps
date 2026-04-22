@@ -207,6 +207,10 @@ def run(f2_threshold: float = F2_ALERT_THRESHOLD) -> dict:
             PSI_ALERT_THRESHOLD, drifted,
         )
 
+    # Best-effort email — no-op if SMTP env vars aren't set, never raises
+    from src import alerting
+    alerting.send_if_alert(report)
+
     METRICS_OUT.parent.mkdir(parents=True, exist_ok=True)
     METRICS_OUT.write_text(json.dumps(report, indent=2, default=str))
     logger.info("Wrote %s", METRICS_OUT)
