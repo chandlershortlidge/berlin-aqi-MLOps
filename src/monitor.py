@@ -1,0 +1,134 @@
+"""Phase 7a — model performance monitoring.
+
+Consumes the monitoring logs that `src.refresh` writes every hour:
+- data/monitoring/predictions.csv   (one row per station per refresh)
+- data/monitoring/actuals.csv       (the PM2.5-derived truth for the same hour)
+
+Joins them on (location_id, target_datetime = observed_datetime) — the
+prediction at 12:00 targets 13:00, and the 13:00 refresh records the
+actual for 13:00 — and reports:
+- rolling 24h F2 macro + per-class
+- rolling 24h accuracy
+- per-station 24h F2
+- all-time F2
+- a threshold-triggered alert on the rolling window
+
+Writes data/monitoring/metrics.json for downstream dashboards and
+logs a WARNING when rolling F2 drops below the alert threshold.
+"""
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pandas as pd
+from sklearn.metrics import accuracy_score, fbeta_score
+
+from src.features import AQI_LABELS
+
+logger = logging.getLogger(__name__)
+
+MONITORING_DIR = Path(__file__).resolve().parents[1] / "data" / "monitoring"
+PREDICTIONS_LOG = MONITORING_DIR / "predictions.csv"
+ACTUALS_LOG = MONITORING_DIR / "actuals.csv"
+METRICS_OUT = MONITORING_DIR / "metrics.json"
+
+# Tier-2 rubric signal — if rolling 24h F2 drops below this, alert.
+# Baseline test F2 macro on Mitte was 0.66; 0.50 is a meaningful regression.
+F2_ALERT_THRESHOLD = 0.50
+
+
+def load_joined() -> pd.DataFrame:
+    """Return a DataFrame of matched (prediction, actual) rows."""
+    if not PREDICTIONS_LOG.exists() or not ACTUALS_LOG.exists():
+        raise FileNotFoundError(
+            f"Monitoring logs not found under {MONITORING_DIR}. "
+            "Run `python -m src.refresh` at least twice (predict + observe)."
+        )
+
+    preds = pd.read_csv(
+        PREDICTIONS_LOG, parse_dates=["refreshed_at", "target_datetime"]
+    )
+    actuals = pd.read_csv(
+        ACTUALS_LOG, parse_dates=["refreshed_at", "observed_datetime"]
+    )
+
+    joined = preds.merge(
+        actuals[["location_id", "observed_datetime", "actual_category", "pm25_actual"]],
+        left_on=["location_id", "target_datetime"],
+        right_on=["location_id", "observed_datetime"],
+        how="inner",
+    )
+    return joined
+
+
+def _metrics_for(df: pd.DataFrame) -> dict:
+    if df.empty:
+        return {"f2_macro": None, "accuracy": None, "f2_per_class": {}, "n": 0}
+    y_true = df["actual_category"]
+    y_pred = df["predicted_category"]
+    labels = sorted(set(y_true) | set(y_pred))
+    per_class = fbeta_score(y_true, y_pred, beta=2, average=None, labels=labels, zero_division=0)
+    return {
+        "f2_macro": float(fbeta_score(y_true, y_pred, beta=2, average="macro", zero_division=0)),
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "f2_per_class": {lbl: float(s) for lbl, s in zip(labels, per_class)},
+        "n": int(len(df)),
+    }
+
+
+def run(f2_threshold: float = F2_ALERT_THRESHOLD) -> dict:
+    joined = load_joined()
+    now = datetime.now(timezone.utc)
+    cutoff_24h = now - timedelta(hours=24)
+
+    last_24h = joined[joined["target_datetime"] >= cutoff_24h]
+
+    per_station: dict[int, dict] = {}
+    for lid, group in last_24h.groupby("location_id"):
+        per_station[int(lid)] = _metrics_for(group)
+
+    report = {
+        "generated_at": now.isoformat(),
+        "total_matched_records": int(len(joined)),
+        "last_24h": _metrics_for(last_24h),
+        "all_time": _metrics_for(joined),
+        "per_station_24h": per_station,
+        "alert": False,
+    }
+
+    f2 = report["last_24h"]["f2_macro"]
+    if report["last_24h"]["n"] > 0 and f2 is not None and f2 < f2_threshold:
+        report["alert"] = True
+        logger.warning(
+            "ALERT: rolling 24h F2 macro (%.3f) below threshold (%.2f) — retraining recommended",
+            f2, f2_threshold,
+        )
+    elif f2 is not None:
+        logger.info("Rolling 24h F2 macro: %.3f (threshold %.2f)", f2, f2_threshold)
+    else:
+        logger.info("Not enough matched records yet for a 24h rolling F2")
+
+    METRICS_OUT.parent.mkdir(parents=True, exist_ok=True)
+    METRICS_OUT.write_text(json.dumps(report, indent=2, default=str))
+    logger.info("Wrote %s", METRICS_OUT)
+    return report
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    report = run()
+
+    print("\n=== Summary ===")
+    print(f"Total matched records: {report['total_matched_records']}")
+    print(f"\nLast 24h (n={report['last_24h']['n']}):")
+    if report["last_24h"]["n"] > 0:
+        print(f"  F2 macro:  {report['last_24h']['f2_macro']:.3f}")
+        print(f"  Accuracy:  {report['last_24h']['accuracy']:.3f}")
+        for lbl in AQI_LABELS:
+            if lbl in report["last_24h"]["f2_per_class"]:
+                print(f"  F2 {lbl:12s} {report['last_24h']['f2_per_class'][lbl]:.3f}")
+    if report["alert"]:
+        print("\n⚠️  ALERT: rolling F2 below threshold")
