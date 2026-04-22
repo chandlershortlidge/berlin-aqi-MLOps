@@ -25,6 +25,10 @@ RUN uv sync --frozen --no-dev
 COPY src/ ./src/
 COPY api/ ./api/
 
+# Baked model artifacts. `uv run python -m src.bundle` must run before
+# `docker build` to populate this directory from the MLflow registry.
+COPY artifacts/ ./artifacts/
+
 
 # -------- Stage 2: runtime --------
 FROM python:3.11-slim
@@ -39,12 +43,11 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/src /app/src
 COPY --from=builder /app/api /app/api
+COPY --from=builder /app/artifacts /app/artifacts
 
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    # Default MLflow tracking URI — overridden by docker-compose for local dev
-    MLFLOW_TRACKING_URI=http://mlflow:5000
+    PYTHONDONTWRITEBYTECODE=1
 
 EXPOSE 8000
 

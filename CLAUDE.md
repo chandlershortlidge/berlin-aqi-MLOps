@@ -57,8 +57,27 @@ uv run python -m src.features                    # build features + train/test s
 uv run python -m src.train --tune                # train with RandomizedSearchCV
 uv run python -m src.register                    # promote latest tuned model to @production
 uv run python -m src.refresh                     # one-shot hourly refresh (cache)
+uv run python -m src.bundle                      # extract @production model to ./artifacts/
 docker compose up --build                        # local container stack (API + MLflow UI)
 ```
+
+## Building the container image
+
+The API container is **fully self-contained** — the model is baked in at
+build time so the runtime has no external dependencies (no MLflow tracking
+server, no registry lookup). This matters for deploys: EC2 / ECS tasks
+just pull the image from ECR and run.
+
+Build sequence:
+
+```bash
+uv run python -m src.bundle           # extracts @production from mlruns/ + mlflow.db
+                                      # into ./artifacts/  (~5 MB)
+docker build -t berlin-aqi:latest .   # COPY artifacts/ bakes it into the image
+```
+
+After promoting a new model version (`src.register`), re-bundle and rebuild
+— there is no runtime model hot-swap by design. Every image = one model.
 
 ## Hourly refresh (Phase 5)
 

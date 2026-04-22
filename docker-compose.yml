@@ -1,7 +1,22 @@
-# Local dev: API container + MLflow UI container share an mlruns volume.
-# Run: docker compose up --build
+# Local dev. Production deploys only the `api` service — it's fully
+# self-contained (model baked in). The `mlflow` service here is for
+# browsing experiments/runs in the UI, not a runtime dependency.
+#
+# Build:   uv run python -m src.bundle && docker compose up --build
 
 services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # features CSV cache for the live fallback path in /predict.
+      # Phase 5's refresh cron writes data/cache/predictions.json,
+      # which the api container reads via the mounted data/ dir.
+      - ./data:/app/data
+
   mlflow:
     image: ghcr.io/mlflow/mlflow:v3.11.1
     command: >
@@ -11,48 +26,11 @@ services:
       --backend-store-uri sqlite:////mlflow.db
       --default-artifact-root /mlruns
     environment:
-      # Let the api container reach mlflow via its service name. The
-      # default DNS-rebinding protection only allows localhost/127.0.0.1.
       # `*` is fine for local dev — production deployments should restrict.
       MLFLOW_SERVER_ALLOWED_HOSTS: "*"
     ports:
-      # Host 5001 — macOS claims 5000 for AirPlay Receiver. Container
-      # internal port stays 5000 so the api service can reach mlflow:5000.
+      # Host 5001 — macOS claims 5000 for AirPlay Receiver.
       - "5001:5000"
     volumes:
-      # MLflow 3.x stores experiments + artifacts in mlruns/ and the
-      # SQL-backed registry in mlflow.db at the project root. Mount both.
       - ./mlruns:/mlruns
       - ./mlflow.db:/mlflow.db
-      # The registry db stores artifact URIs as absolute host paths
-      # (e.g. /Users/foo/.../mlruns/...). Mirror that path inside the
-      # container so resolution works. Production on S3 avoids this.
-      - ./mlruns:/Users/chandlershortlidge/berlin-aqi-MLOps/mlruns
-    healthcheck:
-      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:5000/health\")'"]
-      interval: 10s
-      timeout: 3s
-      retries: 5
-
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    ports:
-      - "8000:8000"
-    environment:
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-    volumes:
-      # Give the API container read access to the features CSVs that
-      # src.features generates. Phase 5 will replace this with a live
-      # cache or S3 object.
-      - ./data:/app/data:ro
-      # mlruns/ is NOT :ro — mlflow.xgboost.load_model writes a
-      # registered_model_meta sidecar next to the artifact on load.
-      - ./mlruns:/mlruns
-      # Same absolute-path shim as the mlflow service — the api also
-      # downloads artifacts via the registry, which uses host paths.
-      - ./mlruns:/Users/chandlershortlidge/berlin-aqi-MLOps/mlruns
-    depends_on:
-      mlflow:
-        condition: service_healthy

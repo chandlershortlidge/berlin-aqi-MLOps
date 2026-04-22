@@ -212,5 +212,8 @@ mlruns/
 mlflow.db
 logs/
 
+# Baked model bundle — populated by src.bundle before docker build
+artifacts/
+
 # Claude Code local settings
 .claude/settings.local.json
