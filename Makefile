@@ -20,3 +20,6 @@ deploy: login bundle build tag push
 
 ssh:
 	ssh -i ~/.ssh/berlin-aqi-key.pem ec2-user@3.71.44.98
+
+frontend:
+	uv run streamlit run frontend/app.py
