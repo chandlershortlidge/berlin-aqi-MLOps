@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 
-from api import cache, model_loader
+from api import cache, history, model_loader
 from api.schemas import HealthResponse, MetricsResponse, PredictResponse
 
 logger = logging.getLogger(__name__)
@@ -111,6 +111,19 @@ def metrics() -> MetricsResponse:
         predictions_by_category=dict(_metrics["by_category"]),
         predictions_with_rule_override=_metrics["rule_overrides"],
     )
+
+
+@app.get("/history")
+def history_for_station(
+    location_id: int = Query(..., description="OpenAQ location_id"),
+    hours: int = Query(24, ge=1, le=168, description="How many hours back to include"),
+) -> dict:
+    """Per-station PM2.5 history from the refresh cron's actuals log."""
+    return {
+        "location_id": location_id,
+        "hours": hours,
+        "points": history.get_recent(location_id, hours),
+    }
 
 
 @app.get("/cache")
