@@ -18,6 +18,8 @@ dependencies = [
     "pydantic>=2.9.0",
     "python-dotenv>=1.0.0",
     "streamlit>=1.56.0",
+    "folium>=0.20.0",
+    "streamlit-folium>=0.27.1",
 ]
 
 [dependency-groups]

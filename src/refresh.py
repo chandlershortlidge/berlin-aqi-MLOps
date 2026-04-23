@@ -61,6 +61,8 @@ def _ingest_one(lid: int, dt_from: str, dt_to: str) -> pd.DataFrame | None:
         weather = fetch_weather(lat, lon, dt_from, dt_to)
         combined = cleaned.merge(weather, on="datetime", how="left")
         combined["location_id"] = lid
+        combined["latitude"] = lat
+        combined["longitude"] = lon
         return combined
     except Exception as exc:
         logger.error("Station %d ingest failed — skipping: %s", lid, exc)
@@ -129,6 +131,8 @@ def run(stations: list[int] | None = None) -> dict:
             "confidence": confidence,
             "rule_override": rule_fired,
             "refreshed_at": now.isoformat(),
+            "latitude": float(latest["latitude"].iloc[0]) if "latitude" in latest else None,
+            "longitude": float(latest["longitude"].iloc[0]) if "longitude" in latest else None,
         }
 
         # Include the primary feature values so monitor.py can run PSI drift

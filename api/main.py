@@ -115,9 +115,9 @@ def metrics() -> MetricsResponse:
 
 @app.get("/cache")
 def cache_status() -> dict:
-    """Debug aid — what the cache currently has."""
+    """Full cache contents + freshness. Feeds the frontend map."""
     if not cache.CACHE_PATH.exists():
-        return {"exists": False, "path": str(cache.CACHE_PATH), "stations": 0}
+        return {"exists": False, "path": str(cache.CACHE_PATH), "stations": 0, "predictions": {}}
     entries = cache.read_all()
     newest = max((e["refreshed_at"] for e in entries.values()), default=None)
     return {
@@ -127,4 +127,5 @@ def cache_status() -> dict:
         "station_ids": sorted(int(k) for k in entries.keys()),
         "newest_refreshed_at": newest,
         "newest_age_seconds": cache.age_seconds(newest) if newest else None,
+        "predictions": entries,
     }
