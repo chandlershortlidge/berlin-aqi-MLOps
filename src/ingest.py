@@ -123,22 +123,33 @@ def _get_with_retry(
     raise RuntimeError("unreachable")
 
 
+PAGE_LIMIT = 500
+INTER_PAGE_SLEEP_SECONDS = 0.5
+
+
 def _paginate_hours(
     client: httpx.Client,
     sensor_id: int,
     datetime_from: str,
     datetime_to: str,
 ) -> list[dict[str, Any]]:
+    # Page size is 500 (not the API max of 1000): at 5yr windows, OpenAQ's
+    # hourly endpoint 408s on 1000-row pages for the high-traffic
+    # Senatsverwaltung sensors. Halving the page size trades 2x request
+    # count for reliability. A small inter-page sleep prevents our
+    # back-to-back pagination from looking like a burst.
     results: list[dict[str, Any]] = []
     page = 1
     while True:
+        if page > 1:
+            time.sleep(INTER_PAGE_SLEEP_SECONDS)
         resp = _get_with_retry(
             client,
             f"/sensors/{sensor_id}/hours",
             params={
                 "datetime_from": datetime_from,
                 "datetime_to": datetime_to,
-                "limit": 1000,
+                "limit": PAGE_LIMIT,
                 "page": page,
             },
         )
@@ -147,7 +158,7 @@ def _paginate_hours(
         if not batch:
             break
         results.extend(batch)
-        if len(batch) < 1000:
+        if len(batch) < PAGE_LIMIT:
             break
         page += 1
     return results
