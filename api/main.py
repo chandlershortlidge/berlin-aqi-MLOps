@@ -116,7 +116,7 @@ def metrics() -> MetricsResponse:
 @app.get("/history")
 def history_for_station(
     location_id: int = Query(..., description="OpenAQ location_id"),
-    hours: int = Query(24, ge=1, le=168, description="How many hours back to include"),
+    hours: int = Query(24, ge=1, le=744, description="How many hours back to include"),
 ) -> dict:
     """Per-station PM2.5 history from the refresh cron's actuals log."""
     return {
