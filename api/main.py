@@ -15,6 +15,7 @@ import logging
 from collections import Counter
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query
 
 from api import cache, history, model_loader
@@ -34,6 +35,10 @@ _metrics: dict = {
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    # /history calls OpenAQ and needs OPENAQ_API_KEY. Pulling .env at
+    # startup keeps `uvicorn api.main:app` self-sufficient in local runs;
+    # in prod the key comes from the task/instance role instead.
+    load_dotenv()
     model_loader.load()
     if not cache.CACHE_PATH.exists():
         logger.warning(
@@ -117,12 +122,28 @@ def metrics() -> MetricsResponse:
 def history_for_station(
     location_id: int = Query(..., description="OpenAQ location_id"),
     hours: int = Query(24, ge=1, le=744, description="How many hours back to include"),
+    parameter: str = Query(
+        "pm25",
+        description="Pollutant: pm25, pm10, or no2",
+    ),
 ) -> dict:
-    """Per-station PM2.5 history from the refresh cron's actuals log."""
+    """Per-station pollutant history. PM2.5/PM10/NO₂ served from OpenAQ v3."""
+    logger.info(
+        "/history location_id=%s parameter=%s hours=%s", location_id, parameter, hours
+    )
+    try:
+        points = history.get_recent(location_id, hours=hours, parameter=parameter)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    logger.info(
+        "/history -> %d points for location_id=%s parameter=%s",
+        len(points), location_id, parameter,
+    )
     return {
         "location_id": location_id,
+        "parameter": parameter,
         "hours": hours,
-        "points": history.get_recent(location_id, hours),
+        "points": points,
     }
 
 
