@@ -58,12 +58,12 @@ CATEGORY_TEXT = {
     "Significant": "#ffffff",
     "High+":       "#ffffff",
 }
-RECOMMENDATIONS = {
-    "All Clear":   "Ideal conditions for outdoor training.",
-    "Low Risk":    "Fine for most. Sensitive athletes may notice irritation on long sessions.",
-    "Elevated":    "Reduce prolonged outdoor exertion. Keep sessions shorter.",
-    "Significant": "Move training indoors — air quality is meaningfully degraded.",
-    "High+":       "Avoid outdoor exercise. Stay indoors and close windows.",
+CATEGORY_DESCRIPTIONS = {
+    "All Clear":   "No restrictions — ideal for outdoor training.",
+    "Low Risk":    "Fine for most athletes, sensitive individuals may notice effects.",
+    "Elevated":    "Reduce prolonged outdoor exertion.",
+    "Significant": "Move training indoors.",
+    "High+":       "Avoid all outdoor exercise — health emergency.",
 }
 
 
@@ -100,7 +100,7 @@ st.markdown(
     <div style="margin-bottom: 1.25em;">
       <h1 style="font-size: 2.6em; margin-bottom: 0.1em;">Berlin AQI</h1>
       <div style="color: #666; font-size: 1.15em;">
-        Next-hour air quality forecast for Berlin athletes
+        Click a station on the map to see its next-hour forecast.
       </div>
     </div>
     """,
@@ -177,8 +177,6 @@ st.markdown(
 )
 
 # ---- Station detail (below the map) --------------------------------
-st.divider()
-
 coord_to_lid = {
     (round(p["latitude"], 5), round(p["longitude"], 5)): lid
     for lid, p in plottable.items()
@@ -189,9 +187,8 @@ if clicked:
     key = (round(clicked["lat"], 5), round(clicked["lng"], 5))
     selected_lid = coord_to_lid.get(key)
 
-if selected_lid is None:
-    st.info("Click a station on the map to see its next-hour forecast.")
-else:
+if selected_lid is not None:
+    st.divider()
     p = plottable[selected_lid]
     cat = p["predicted_category"]
     name = STATION_NAMES.get(int(selected_lid), f"Station {selected_lid}")
@@ -227,7 +224,7 @@ else:
     st.markdown(
         f"""
         <div style="font-size: 1.1em; margin-bottom: 0.4em;">
-          <strong>{RECOMMENDATIONS.get(cat, '')}</strong>
+          <strong>{CATEGORY_DESCRIPTIONS.get(cat, '')}</strong>
         </div>
         <div style="color: #777; font-size: 0.9em; margin-bottom: 1em;">
           {fresh_line} · Target: {format_target(p['target_datetime'])}
