@@ -119,25 +119,14 @@ def get_cache() -> dict:
 
 
 @st.cache_data(ttl=300)
-def get_history(location_id: int, hours: int, parameter: str) -> dict:
-    """Fetch history + return the full envelope so we can surface debug info."""
-    url = f"{API_BASE}/history"
-    params = {"location_id": location_id, "hours": hours, "parameter": parameter}
-    print(f"[history] GET {url} params={params}", flush=True)
-    r = httpx.get(url, params=params, timeout=30)
-    status = r.status_code
-    print(f"[history] <- status={status}", flush=True)
+def get_history(location_id: int, hours: int, parameter: str) -> list[dict]:
+    r = httpx.get(
+        f"{API_BASE}/history",
+        params={"location_id": location_id, "hours": hours, "parameter": parameter},
+        timeout=30,
+    )
     r.raise_for_status()
-    body = r.json()
-    print(f"[history] <- points={len(body.get('points', []))}", flush=True)
-    return {
-        "points": body.get("points", []),
-        "debug": {
-            "url": str(r.request.url),
-            "status": status,
-            "point_count": len(body.get("points", [])),
-        },
-    }
+    return r.json().get("points", [])
 
 
 def freshness_label(age_seconds: int | None) -> str:
@@ -359,35 +348,16 @@ def render_history(selected_lid: int | None, selected_name: str | None,
 
     with st.spinner("Loading history from OpenAQ…"):
         try:
-            result = get_history(int(selected_lid), hours=fetch_hours, parameter=parameter)
+            points = get_history(int(selected_lid), hours=fetch_hours, parameter=parameter)
         except httpx.HTTPError as exc:
             st.error(f"Couldn't load history: {exc}")
-            with st.expander("Debug — last fetch attempt"):
-                st.write({
-                    "location_id": int(selected_lid),
-                    "parameter": parameter,
-                    "hours": fetch_hours,
-                    "error": str(exc),
-                })
             return
-
-    points = result["points"]
-    dbg = result["debug"]
 
     if not points:
         st.info(
             f"No {pollutant_label} readings available for this station "
             f"in the {range_label.lower()}."
         )
-        with st.expander("Debug — last fetch attempt"):
-            st.write({
-                "location_id": int(selected_lid),
-                "parameter": parameter,
-                "hours": fetch_hours,
-                "request_url": dbg["url"],
-                "http_status": dbg["status"],
-                "point_count": dbg["point_count"],
-            })
         return
 
     df = pd.DataFrame(points)
@@ -643,7 +613,6 @@ clicked = (map_data or {}).get("last_object_clicked") if map_data else None
 tooltip = (map_data or {}).get("last_object_clicked_tooltip") if map_data else None
 selected_lid: int | None = None
 selected_name: str | None = None
-click_debug: dict = {"clicked": clicked, "tooltip": tooltip, "match": None}
 
 # Primary: decode the station ID from the tooltip we stamped on each
 # marker. Tooltips only surface for actual marker/popup clicks, so this
@@ -651,50 +620,22 @@ click_debug: dict = {"clicked": clicked, "tooltip": tooltip, "match": None}
 lid_from_tooltip = _lid_from_tooltip(tooltip)
 if lid_from_tooltip is not None and str(lid_from_tooltip) in plottable:
     selected_lid = lid_from_tooltip
-    click_debug["match"] = "tooltip-id"
 
 # Backup: coord match, only useful for older streamlit-folium versions
-# that don't populate last_object_clicked_tooltip. Requires a tight
-# match so we don't accept tile clicks.
+# that don't populate last_object_clicked_tooltip. Tight match so we
+# don't accept tile clicks.
 if selected_lid is None and clicked:
     for precision in (5, 4):
         key = (round(clicked["lat"], precision), round(clicked["lng"], precision))
         raw_lid = coord_to_lid.get(key)
         if raw_lid is not None:
             selected_lid = int(raw_lid)
-            click_debug["match"] = f"coord @ {precision}dp"
             break
-
-if selected_lid is None and clicked and tooltip is None:
-    click_debug["match"] = "no tooltip and coord miss"
-elif selected_lid is None and clicked:
-    click_debug["match"] = "tooltip present but unparseable"
 
 if selected_lid is not None:
     selected_name = STATION_NAMES.get(selected_lid, f"Station {selected_lid}")
 
-print(
-    f"[click] tooltip={tooltip!r} coords={clicked} -> lid={selected_lid} "
-    f"name={selected_name} match={click_debug['match']}",
-    flush=True,
-)
-
 render_history(selected_lid, selected_name, plottable)
-
-with st.expander("Debug — click & lookup"):
-    st.write({
-        "last_object_clicked": clicked,
-        "last_object_clicked_tooltip": tooltip,
-        "parsed_from_tooltip": _lid_from_tooltip(tooltip),
-        "match_result": click_debug["match"],
-        "selected_location_id": selected_lid,
-        "selected_name": selected_name,
-        "known_station_coords": {
-            int(lid): (round(p["latitude"], 5), round(p["longitude"], 5))
-            for lid, p in plottable.items()
-        },
-    })
-
 render_footer()
 
 if missing_coords:

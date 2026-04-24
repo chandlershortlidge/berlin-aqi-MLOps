@@ -128,17 +128,10 @@ def history_for_station(
     ),
 ) -> dict:
     """Per-station pollutant history. PM2.5/PM10/NO₂ served from OpenAQ v3."""
-    logger.info(
-        "/history location_id=%s parameter=%s hours=%s", location_id, parameter, hours
-    )
     try:
         points = history.get_recent(location_id, hours=hours, parameter=parameter)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    logger.info(
-        "/history -> %d points for location_id=%s parameter=%s",
-        len(points), location_id, parameter,
-    )
     return {
         "location_id": location_id,
         "parameter": parameter,
