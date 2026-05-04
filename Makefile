@@ -2,7 +2,7 @@ AWS_ACCOUNT_ID = 458960552929
 AWS_REGION     = eu-central-1
 IMAGE          = $(AWS_ACCOUNT_ID).dkr.ecr.$(AWS_REGION).amazonaws.com/berlin-aqi-mlops:latest
 
-EC2_HOST       = 3.71.44.98
+EC2_HOST       = 18.195.97.53
 EC2_USER       = ec2-user
 SSH_KEY        = ~/.ssh/berlin-aqi-key.pem
 CONTAINER_NAME = berlin-aqi
