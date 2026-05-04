@@ -217,3 +217,9 @@ artifacts/
 
 # Claude Code local settings
 .claude/settings.local.json
+
+*.png
+*.pptx
+
+# Stray mlflow tracking DB (canonical one is mlflow.db, already ignored above)
+mlflow.d
